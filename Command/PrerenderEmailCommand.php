@@ -45,15 +45,15 @@ class PrerenderEmailCommand extends Command
     {
         $io = new SymfonyStyle($input, $output);
 
-        $emailId  = (int) $input->getOption('email');
-        $segmentId = $input->getOption('segment') ? (int) $input->getOption('segment') : null;
+        $emailId     = (int) $input->getOption('email');
+        $segmentId   = $input->getOption('segment') ? (int) $input->getOption('segment') : null;
         $contactsOpt = $input->getOption('contacts');
-        $batch    = max(1, (int) $input->getOption('batch'));
-        $limit    = (int) $input->getOption('limit');
-        $ttlHours = (int) $input->getOption('ttl');
+        $batch       = max(1, (int) $input->getOption('batch'));
+        $limit       = (int) $input->getOption('limit');
+        $ttlHours    = (int) $input->getOption('ttl');
 
         if ($emailId <= 0) {
-                       $io->error('--email is required');
+            $io->error('--email is required');
 
             return Command::FAILURE;
         }
