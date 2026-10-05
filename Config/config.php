@@ -4,15 +4,16 @@ declare(strict_types=1);
 
 return [
     'name'        => 'Email Pre-Render',
-    'description' => 'Pre-compiles and caches fully rendered email payloads (generate once, reuse on send). Configurable short-circuit for third-party plugin compatibility.',
-    'version'     => '1.1.0',
+    'description' => 'Pre-compiles and caches fully rendered email payloads (generate once, reuse on send). Campaign action + auto-invalidation on email/DWC change.',
+    'version'     => '1.2.0',
     'author'      => 'Wiesław Golec',
 
     'parameters' => [
-        // Master switch for send-time cache reuse
-        'emailprerender.enabled' => true,
-        // On cache hit, stop further EMAIL_ON_SEND listeners (true = max speed; false = safer with some 3rd-party plugins)
-        'emailprerender.short_circuit' => true,
+        'emailprerender.enabled'                 => true,
+        'emailprerender.short_circuit'           => true,
+        'emailprerender.auto_invalidate'         => true,
+        'emailprerender.campaign_action_enabled' => true,
+        'emailprerender.default_ttl_hours'       => 72,
     ],
 
     'services' => [
@@ -22,6 +23,26 @@ return [
                 'arguments' => [
                     'mautic.emailprerender.model',
                     'mautic.helper.core_parameters',
+                    'monolog.logger.mautic',
+                ],
+                'tag' => 'kernel.event_subscriber',
+            ],
+            'mautic.emailprerender.campaign_subscriber' => [
+                'class'     => \MauticPlugin\MauticEmailPreRenderBundle\EventListener\CampaignSubscriber::class,
+                'arguments' => [
+                    'mautic.emailprerender.model',
+                    'mautic.email.model.email',
+                    'mautic.helper.core_parameters',
+                    'monolog.logger.mautic',
+                ],
+                'tag' => 'kernel.event_subscriber',
+            ],
+            'mautic.emailprerender.invalidation_subscriber' => [
+                'class'     => \MauticPlugin\MauticEmailPreRenderBundle\EventListener\CacheInvalidationSubscriber::class,
+                'arguments' => [
+                    'mautic.emailprerender.model',
+                    'mautic.helper.core_parameters',
+                    'doctrine.orm.entity_manager',
                     'monolog.logger.mautic',
                 ],
                 'tag' => 'kernel.event_subscriber',
