@@ -24,11 +24,19 @@ namespace Mautic\CoreBundle\Helper {
     }
 }
 
+namespace Mautic\CoreBundle\Entity {
+    if (!class_exists(CommonRepository::class, false)) {
+        class CommonRepository
+        {
+        }
+    }
+}
+
 namespace Mautic\EmailBundle {
     if (!class_exists(EmailEvents::class, false)) {
         final class EmailEvents
         {
-            public const EMAIL_ON_SEND  = 'mautic.email_on_send';
+            public const EMAIL_ON_SEND   = 'mautic.email_on_send';
             public const EMAIL_POST_SAVE = 'mautic.email_post_save';
         }
     }
@@ -267,6 +275,7 @@ namespace Mautic\EmailBundle\Helper {
             {
             }
 
+            /** @param array<int|string, mixed> $source */
             public function setSource(array $source): void
             {
             }
@@ -288,7 +297,6 @@ namespace Mautic\EmailBundle\Helper {
 
             public function dispatchSendEvent(): void
             {
-                // Simulate listeners enriching content
                 $this->body = (string) $this->body.'<!--rendered-->';
                 $this->tokens['{test}'] = 'value';
             }
@@ -537,10 +545,14 @@ namespace Doctrine\ORM {
     if (!interface_exists(EntityManagerInterface::class, false)) {
         interface EntityManagerInterface
         {
-            public function getRepository(string $class):
-            public function persist(object $entity):
-            public function remove(object $entity):
+            public function getRepository(string $className): object;
+
+            public function persist(object $entity): void;
+
+            public function remove(object $entity): void;
+
             public function flush(): void;
+
             public function getConnection(): object;
         }
     }
