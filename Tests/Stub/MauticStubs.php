@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 /**
  * Minimal stubs so unit tests run without a full Mautic installation.
- * Only define classes/interfaces that are not already loaded.
  */
 
 namespace Mautic\CoreBundle\Helper {
@@ -28,6 +27,62 @@ namespace Mautic\CoreBundle\Entity {
     if (!class_exists(CommonRepository::class, false)) {
         class CommonRepository
         {
+        }
+    }
+}
+
+namespace Mautic\CoreBundle\Doctrine\Mapping {
+    if (!class_exists(ClassMetadataBuilder::class, false)) {
+        class ClassMetadataBuilder
+        {
+            public function __construct(mixed $metadata)
+            {
+            }
+
+            public function setTable(string $name): self
+            {
+                return $this;
+            }
+
+            public function setCustomRepositoryClass(string $class): self
+            {
+                return $this;
+            }
+
+            public function addId(): self
+            {
+                return $this;
+            }
+
+            public function createField(string $name, string $type): self
+            {
+                return $this;
+            }
+
+            public function columnName(string $name): self
+            {
+                return $this;
+            }
+
+            public function length(int $len): self
+            {
+                return $this;
+            }
+
+            public function nullable(): self
+            {
+                return $this;
+            }
+
+            public function build(): self
+            {
+                return $this;
+            }
+
+            public function addIndex(array $cols, string $name): self
+            {
+                return $this;
+            }
         }
     }
 }
@@ -541,6 +596,16 @@ namespace Symfony\Contracts\EventDispatcher {
     }
 }
 
+namespace Symfony\Component\EventDispatcher {
+    if (!interface_exists(EventSubscriberInterface::class, false)) {
+        interface EventSubscriberInterface
+        {
+            /** @return array<string, mixed> */
+            public static function getSubscribedEvents(): array;
+        }
+    }
+}
+
 namespace Doctrine\ORM {
     if (!interface_exists(EntityManagerInterface::class, false)) {
         interface EntityManagerInterface
@@ -554,6 +619,14 @@ namespace Doctrine\ORM {
             public function flush(): void;
 
             public function getConnection(): object;
+        }
+    }
+}
+
+namespace Doctrine\ORM\Mapping {
+    if (!class_exists(ClassMetadata::class, false)) {
+        class ClassMetadata
+        {
         }
     }
 }
