@@ -1,0 +1,24 @@
+{
+    "name": "wieslawgolec/mautic-email-prerender-bundle",
+    "description": "A Mautic 7 plugin that pre-compiles and caches email payloads in advance, eliminating runtime rendering overhead during the dispatch event loop.",
+    "type": "mautic-plugin",
+    "license": "MIT",
+    "authors": [
+        {
+            "name": "Wiesław Golec",
+            "homepage": "https://github.com/wieslawgolec"
+        }
+    ],
+    "require": {
+        "php": ">=8.2",
+        "mautic/core-lib": "^7.0"
+    },
+    "extra": {
+        "install-directory-name": "MauticEmailPreRenderBundle"
+    },
+    "autoload": {
+        "psr-4": {
+            "MauticPlugin\\MauticEmailPreRenderBundle\\": ""
+        }
+    }
+}
