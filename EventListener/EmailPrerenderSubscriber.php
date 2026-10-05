@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MauticPlugin\MauticEmailPreRenderBundle\EventListener;
 
+use Mautic\CoreBundle\Helper\CoreParametersHelper;
 use Mautic\EmailBundle\EmailEvents;
 use Mautic\EmailBundle\Event\EmailSendEvent;
 use MauticPlugin\MauticEmailPreRenderBundle\Model\PrerenderModel;
@@ -11,16 +12,17 @@ use Psr\Log\LoggerInterface;
 use Symfony\Component\EventDispatcher\EventSubscriberInterface;
 
 /**
- * Late listener that injects a pre-rendered payload when available.
+ * Early EMAIL_ON_SEND listener: on valid cache hit, inject stored payload and
+ * optionally short-circuit remaining listeners (configurable).
  *
- * Priority is intentionally very low (-100) so that Advanced Templates Bundle,
- * core listeners (preheader, tokens, DWC, tracking, etc.) and any other plugins
- * run first during a normal generation. On a cache hit we only replace the
- * already-processed content.
+ * Priority 255 = run before typical plugin/core content mutators so generation
+ * is not paid twice when short_circuit is enabled.
  */
-class EmailPrerenderSubscriber implements EventSubscriberInterface\n{
+class EmailPrerenderSubscriber implements EventSubscriberInterface
+{
     public function __construct(
         private PrerenderModel $prerenderModel,
+        private CoreParametersHelper $coreParametersHelper,
         private LoggerInterface $logger,
     ) {
     }
@@ -28,15 +30,16 @@ class EmailPrerenderSubscriber implements EventSubscriberInterface\n{
     public static function getSubscribedEvents(): array
     {
         return [
-            EmailEvents::EMAIL_ON_SEND => ['onEmailSendUseCache', -100],
-            // Uncomment if you also want browser previews to benefit from cache:
-            // EmailEvents::EMAIL_ON_DISPLAY => ['onEmailSendUseCache', -100],
+            EmailEvents::EMAIL_ON_SEND => ['onEmailSendUseCache', 255],
         ];
     }
 
     public function onEmailSendUseCache(EmailSendEvent $event): void
     {
-        // Never interfere with internal / test sends
+        if (!$this->coreParametersHelper->get('emailprerender.enabled', true)) {
+            return;
+        }
+
         if ($event->isInternalSend()) {
             return;
         }
@@ -54,13 +57,11 @@ class EmailPrerenderSubscriber implements EventSubscriberInterface\n{
         }
 
         $cache = $this->prerenderModel->findCache($email, $lead);
-
         if (null === $cache) {
-            return; // cache miss → normal pipeline continues (already ran)
+            return;
         }
 
-        // Inject the fully rendered payload that was produced earlier
-        // by the complete listener chain (including Advanced Templates).
+        // Inject pre-generated payload (produced once during prerender)
         $event->setContent($cache->getHtml());
         $event->setSubject($cache->getSubject());
 
@@ -68,9 +69,21 @@ class EmailPrerenderSubscriber implements EventSubscriberInterface\n{
             $event->setPlainText($cache->getPlainText());
         }
 
-        $this->logger->debug(
-            'EmailPreRender: cache hit for email {emailId} / contact {contactId}',
-            ['emailId' => $email->getId(), 'contactId' => $contactId]
-        );
+        $tokens = $cache->getTokens();
+        if ($tokens !== []) {
+            $event->addTokens($tokens);
+        }
+
+        $this->logger->debug('EmailPreRender: cache hit email={emailId} contact={contactId}', [
+            'emailId'   => $email->getId(),
+            'contactId' => $contactId,
+        ]);
+
+        if ($this->coreParametersHelper->get('emailprerender.short_circuit', true)) {
+            // Skip remaining EMAIL_ON_SEND listeners — content is already final.
+            // Disable via emailprerender.short_circuit=false if a 3rd-party plugin
+            // must still run on every real send.
+            $event->stopPropagation();
+        }
     }
 }

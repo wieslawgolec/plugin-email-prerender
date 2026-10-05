@@ -7,19 +7,18 @@ namespace MauticPlugin\MauticEmailPreRenderBundle\Migrations;
 use Doctrine\DBAL\Schema\Schema;
 use Doctrine\Migrations\AbstractMigration;
 
-/**
- * Creates the email_prerender_cache table.
- */
 final class Version20261005120000 extends AbstractMigration
 {
     public function getDescription(): string
     {
-        return 'Create email_prerender_cache table for Mautic Email Pre-Render Plugin';
+        return 'Create email_prerender_cache table (payload + tokens JSON) for Email Pre-Render Plugin';
     }
 
     public function up(Schema $schema): void
     {
-        $this->addSql('CREATE TABLE IF NOT EXISTS '.MAUTIC_TABLE_PREFIX.'email_prerender_cache (
+        $table = MAUTIC_TABLE_PREFIX.'email_prerender_cache';
+
+        $this->addSql('CREATE TABLE IF NOT EXISTS '.$table.' (
             id INT UNSIGNED AUTO_INCREMENT NOT NULL,
             email_id INT NOT NULL,
             contact_id INT NOT NULL,
@@ -27,9 +26,10 @@ final class Version20261005120000 extends AbstractMigration
             contact_hash VARCHAR(64) NOT NULL,
             subject LONGTEXT NOT NULL,
             html LONGTEXT NOT NULL,
-            plain_text LONGTEXT DEFAULT,
+            plain_text LONGTEXT DEFAULT NULL,
+            tokens JSON DEFAULT NULL,
             created_at DATETIME NOT NULL,
-            expires_at DATETIME NULL,
+            expires_at DATETIME DEFAULT NULL,
             PRIMARY KEY(id),
             INDEX idx_email_id (email_id),
             INDEX idx_expires (expires_at),

@@ -1,29 +1,54 @@
 # Mautic Email Pre-Render Plugin
 
-**Plugin directory name (required):** `MauticEmailPreRenderBundle`
+**Install directory name (required):** `MauticEmailPreRenderBundle`
 
-A Mautic 7 plugin that pre-compiles and caches fully rendered email payloads (HTML, subject, plain text) in advance. On the real `email.send` event the plugin can inject the cached payload late in the listener chain, eliminating most of the per-contact rendering cost for high-volume campaigns (100k–500k+ emails).
+A Mautic 7 plugin that **generates each personalized email once**, stores the finished payload (HTML, subject, plain text, tokens, hashes), and on the real `email.send` path **reuses that payload** when the cache entry is still valid.
 
-Designed to **coexist** with third-party renderers such as the Logicify Advanced Templates Bundle (`{% TWIG_BLOCK %}`), other Twig enhancers, core dynamic content, tokens, preheaders, tracking pixels, etc.
+Goal: avoid running the full rendering pipeline (tokens, Dynamic Content, Advanced Templates / Twig, etc.) again for every contact during high-volume dispatch (100k–500k+).
 
-## How it works
+## Design (important)
 
-1. **Pre-generation** (`bin/console mautic:email:prerender`)
-   - Runs the **full** normal generation pipeline (`MailHelper` + `EmailEvents::EMAIL_ON_SEND`).
-   - All listeners (Advanced Templates, core, other plugins) execute normally.
-   - Stores the **final** HTML / subject / plain text in a dedicated cache table.
+### Single generation
 
-2. **Send time** (listener priority `-100`)
-   - Runs **after** every other listener.
-   - On cache hit → replaces content with the pre-rendered version.
-   - On cache miss → falls back to normal generation (no breakage).
+| Phase | What runs |
+|-------|-----------|
+| **Pre-render** (`mautic:email:prerender`) | Full pipeline once: `MailHelper` + `EMAIL_ON_SEND` listeners (core + Advanced Templates + other plugins). Result is stored. |
+| **Real send** | If cache hit and feature enabled → inject stored HTML/subject/plain text/tokens. Optionally **short-circuit** remaining listeners (`stopPropagation`). |
 
-## Compatibility goals
+There is **no** “generate fully, then overwrite late” path by default. Late overwrite would still pay for a full generation.
 
-- Does **not** short-circuit the generation path during pre-render.
-- Does **not** re-implement Twig / token replacement.
-- Uses a composite cache key so template changes and contact field changes invalidate correctly.
-- Skips internal / test sends.
+### Configurable short-circuit
+
+Early reuse can conflict with third-party plugins that **must** run on every real send (custom headers, ESP routing, last-mile token injection, compliance hooks).
+
+| Parameter | Default | Meaning |
+|-----------|---------|--------|
+| `emailprerender.enabled` | `true` | Master switch. When `false`, the send-time listener does nothing. |
+| `emailprerender.short_circuit` | `true` | On cache hit, inject payload and call `stopPropagation()` so later `EMAIL_ON_SEND` listeners do not run. Set to `false` if a plugin must still run after content is set (they will see the cached HTML). |
+
+Configure in Mautic local config (e.g. `config/local.php`) or parameters:
+
+```php
+'emailprerender.enabled' => true,
+'emailprerender.short_circuit' => true, // set false if 3rd-party send listeners must always run
+```
+
+### Cache validity
+
+An entry is used only when **all** of the following match:
+
+- `email_id` + `contact_id`
+- `content_hash` (email template / revision / subject / HTML fingerprint)
+- `contact_hash` (hash of contact profile fields used for personalization)
+- `expires_at` is null or in the future
+
+Stored fields: `subject`, `html`, `plain_text`, `tokens` (JSON), hashes, timestamps.
+
+### Compatibility notes
+
+- **Advanced Templates / Twig plugins**: Work at **pre-render** time (full `EMAIL_ON_SEND`). On a short-circuited real send they do not run again (content is already final).
+- If you need a plugin to run on every real send, set `emailprerender.short_circuit` to `false` or disable the plugin for that campaign workflow.
+- Internal / test sends never use the cache.
 
 ## Requirements
 
@@ -32,93 +57,87 @@ Designed to **coexist** with third-party renderers such as the Logicify Advanced
 
 ## Installation
 
-1. Clone or copy this repository into your Mautic `plugins` directory **and rename the folder**:
+```bash
+cd /path/to/mautic/plugins
+git clone https://github.com/wieslawgolec/plugin-email-prerender.git MauticEmailPreRenderBundle
+# folder MUST be named MauticEmailPreRenderBundle
 
-   ```bash
-   cd /path/to/mautic/plugins
-   git clone https://github.com/wieslawgolec/plugin-email-prerender.git MauticEmailPreRenderBundle
-   # OR if you already cloned elsewhere:
-   # mv plugin-email-prerender MauticEmailPreRenderBundle
-   ```
+php bin/console cache:clear
+php bin/console mautic:plugins:reload
+php bin/console doctrine:migrations:migrate --no-interaction
+# fallback: php bin/console doctrine:schema:update --force
+```
 
-   The folder **must** be named `MauticEmailPreRenderBundle` (case-sensitive).
-
-2. Clear cache and install/reload plugins:
-
-   ```bash
-   php bin/console cache:clear
-   php bin/console mautic:plugins:reload
-   # or from the UI: Settings → Plugins → Install/Upgrade Plugins
-   ```
-
-3. Run database migrations (creates `email_prerender_cache` table):
-
-   ```bash
-   php bin/console doctrine:migrations:migrate --no-interaction
-   # or, if the migration is not auto-discovered yet:
-   php bin/console doctrine:schema:update --force
-   ```
-
-4. (Optional) Enable the plugin in **Settings → Plugins** if it is not enabled automatically.
+Enable under **Settings → Plugins** if needed.
 
 ## Usage
 
-### Pre-generate emails
+### Pre-generate (full pipeline once per contact)
 
 ```bash
-# Pre-render for a specific email ID and a segment
+# Segment: contacts are loaded in DB batches (cursor on lead_lists_leads), not all at once
 php bin/console mautic:email:prerender --email=123 --segment=45 --batch=200
 
-# Pre-render for an email and an explicit list of contact IDs
+# Explicit contact IDs
 php bin/console mautic:email:prerender --email=123 --contacts=1,2,3,4,5
 
-# Limit how many contacts to process in this run
-php bin/console mautic:email:prerender --email=123 --segment=45 --limit=5000
+# Cap this run
+php bin/console mautic:email:prerender --email=123 --segment=45 --limit=5000 --ttl=72
 ```
 
 ### Clear cache
 
 ```bash
 php bin/console mautic:email:prerender:clear --email=123
+php bin/console mautic:email:prerender:clear --expired
 php bin/console mautic:email:prerender:clear --all
 ```
 
-## Cache key strategy
-
-| Component        | Purpose                                      |
-|------------------|----------------------------------------------|
-| `email_id`       | Which email template                         |
-| `contact_id`     | Which contact                                |
-| `content_hash`   | Email content / revision fingerprint         |
-| `contact_hash`   | Hash of relevant contact field values        |
-
-When the email is edited or relevant contact fields change, the hash changes → cache miss → normal generation runs.
-
-## Architecture overview
+## Architecture
 
 ```
 MauticEmailPreRenderBundle/
-├── Config/config.php
+├── Config/config.php              # services + default parameters
 ├── MauticEmailPreRenderBundle.php
-├── Entity/EmailPrerenderCache.php
+├── Entity/EmailPrerenderCache.php # payload + tokens JSON + hashes
 ├── Entity/EmailPrerenderCacheRepository.php
-├── EventListener/EmailPrerenderSubscriber.php
-├── Command/PrerenderEmailCommand.php
+├── EventListener/EmailPrerenderSubscriber.php  # high priority; configurable short-circuit
+├── Model/PrerenderModel.php       # Mautic 7 MailHelper::dispatchSendEvent path
+├── Command/PrerenderEmailCommand.php           # batched segment loading
 ├── Command/ClearPrerenderCacheCommand.php
-├── Model/PrerenderModel.php
-├── Migrations/Version20261005120000.php
-└── Resources/...
+└── Migrations/Version20261005120000.php
 ```
 
-## Important notes / limitations (skeleton)
+### Pre-render path (Mautic 7)
 
-- This is a **working skeleton**. The pre-generation command currently contains the structure and hooks; you may need to refine how `MailHelper` is fully driven for your exact Mautic 7 minor version and installed plugins.
-- Always test thoroughly with emails that use Advanced Templates (`{% TWIG_BLOCK %}`), Dynamic Content, owner signatures, and tracking tokens before production use at scale.
-- Storage of 500k fully rendered HTML bodies requires adequate database capacity and cleanup policy (`expires_at` + clear command).
+`PrerenderModel::prerenderForContact()`:
+
+1. `MailHelper::reset()`
+2. `setEmail()` / `setLead(profileFields)` / `setIdHash()` / `setSource()`
+3. Seed body/subject from the Email entity
+4. **`dispatchSendEvent()`** — runs all `EMAIL_ON_SEND` listeners (no transport delivery)
+5. Persist final subject, HTML, plain text, tokens, hashes
+
+### Send path
+
+`EmailPrerenderSubscriber` on `EMAIL_ON_SEND` at **priority 255** (runs early):
+
+1. Skip if disabled, internal send, or missing email/lead
+2. Lookup valid cache
+3. On hit → `setContent` / `setSubject` / `setPlainText` / `addTokens`
+4. If `short_circuit` → `stopPropagation()`
+
+## Operational caveats
+
+- **Storage**: Fully rendered HTML for 500k contacts is large; plan disk/DB size and TTL / clear policy.
+- **Invalidation**: Editing the email or changing contact fields changes hashes → cache miss → normal generation (unless you re-run prerender).
+- **Segment membership**: Pre-render only contacts currently in the segment table (`manually_removed = 0`). Rebuild segments before large prerender runs if needed.
+- **idHash / tracking**: A new `idHash` is still created on the real send by core; cached HTML may already contain links from the pre-render idHash. For strict tracking parity, validate open/click behaviour on a pilot segment before full volume.
+- Always pilot with Advanced Templates / DWC emails before production scale.
 
 ## License
 
-MIT (see LICENSE file).
+MIT
 
 ## Author
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace MauticPlugin\MauticEmailPreRenderBundle\Command;
 
+use Doctrine\ORM\EntityManagerInterface;
 use Mautic\EmailBundle\Model\EmailModel;
 use Mautic\LeadBundle\Model\LeadModel;
 use Mautic\LeadBundle\Model\ListModel;
@@ -17,7 +18,7 @@ use Symfony\Component\Console\Style\SymfonyStyle;
 
 #[AsCommand(
     name: 'mautic:email:prerender',
-    description: 'Pre-render and cache fully personalized emails for later high-speed sending'
+    description: 'Pre-render emails once (full pipeline) and cache payload for fast send reuse'
 )]
 class PrerenderEmailCommand extends Command
 {
@@ -26,6 +27,7 @@ class PrerenderEmailCommand extends Command
         private EmailModel $emailModel,
         private ListModel $listModel,
         private LeadModel $leadModel,
+        private EntityManagerInterface $em,
     ) {
         parent::__construct();
     }
@@ -34,11 +36,11 @@ class PrerenderEmailCommand extends Command
     {
         $this
             ->addOption('email', null, InputOption::VALUE_REQUIRED, 'Email ID to pre-render')
-            ->addOption('segment', null, InputOption::VALUE_OPTIONAL, 'Segment / List ID whose contacts should be pre-rendered')
+            ->addOption('segment', null, InputOption::VALUE_OPTIONAL, 'Segment / List ID')
             ->addOption('contacts', null, InputOption::VALUE_OPTIONAL, 'Comma-separated contact IDs')
-            ->addOption('batch', null, InputOption::VALUE_OPTIONAL, 'Contacts per batch (memory control)', 100)
-            ->addOption('limit', null, InputOption::VALUE_OPTIONAL, 'Maximum contacts to process in this run', 0)
-            ->addOption('ttl', null, InputOption::VALUE_OPTIONAL, 'Cache TTL in hours (0 = no expiry)', 72);
+            ->addOption('batch', null, InputOption::VALUE_OPTIONAL, 'Contacts per DB batch', 200)
+            ->addOption('limit', null, InputOption::VALUE_OPTIONAL, 'Max contacts this run (0 = all)', 0)
+            ->addOption('ttl', null, InputOption::VALUE_OPTIONAL, 'Cache TTL hours (0 = no expiry)', 72);
     }
 
     protected function execute(InputInterface $input, OutputInterface $output): int
@@ -65,13 +67,34 @@ class PrerenderEmailCommand extends Command
             return Command::FAILURE;
         }
 
-        $contactIds = [];
+        $expiresAt = null;
+        if ($ttlHours > 0) {
+            $expiresAt = (new \DateTimeImmutable())->modify(sprintf('+%d hours', $ttlHours));
+        }
+
+        $io->title(sprintf('Pre-rendering email "%s" (ID %d)', $email->getName(), $emailId));
+
+        $success = 0;
+        $failed  = 0;
+        $processed = 0;
 
         if ($contactsOpt) {
-            $contactIds = array_filter(array_map('intval', explode(',', $contactsOpt)));
+            $ids = array_values(array_filter(array_map('intval', explode(',', $contactsOpt))));
+            if ($limit > 0) {
+                $ids = array_slice($ids, 0, $limit);
+            }
+            $io->progressStart(count($ids));
+            foreach (array_chunk($ids, $batch) as $chunk) {
+                foreach ($chunk as $contactId) {
+                    $this->processContact($email, $contactId, $expiresAt, $success, $failed);
+                    ++$processed;
+                    $io->progressAdvance();
+                }
+                $this->em->clear();
+                gc_collect_cycles();
+            }
+            $io->progressFinish();
         } elseif ($segmentId) {
-            // Basic approach: load leads belonging to the list.
-            // For very large segments you should replace this with a streaming query.
             $list = $this->listModel->getEntity($segmentId);
             if (null === $list) {
                 $io->error(sprintf('Segment/List ID %d not found', $segmentId));
@@ -79,9 +102,34 @@ class PrerenderEmailCommand extends Command
                 return Command::FAILURE;
             }
 
-            $leads = $this->listModel->getLeadsByList($list, true, false);
-            foreach ($leads as $lead) {
-                $contactIds[] = (int) $lead->getId();
+            // Streaming batch load via lead_lists_leads (cursor), not getLeadsByList()
+            $lastId = 0;
+            $io->writeln(sprintf('Streaming contacts from segment %d (batch=%d)...', $segmentId, $batch));
+
+            while (true) {
+                if ($limit > 0 && $processed >= $limit) {
+                    break;
+                }
+
+                $fetchSize = $batch;
+                if ($limit > 0) {
+                    $fetchSize = min($batch, $limit - $processed);
+                }
+
+                $rows = $this->fetchSegmentContactIds($segmentId, $lastId, $fetchSize);
+                if ($rows === []) {
+                    break;
+                }
+
+                foreach ($rows as $contactId) {
+                    $this->processContact($email, $contactId, $expiresAt, $success, $failed);
+                    ++$processed;
+                    $lastId = $contactId;
+                }
+
+                $io->writeln(sprintf('  processed=%d success=%d failed=%d lastId=%d', $processed, $success, $failed, $lastId));
+                $this->em->clear();
+                gc_collect_cycles();
             }
         } else {
             $io->error('Provide either --segment or --contacts');
@@ -89,53 +137,52 @@ class PrerenderEmailCommand extends Command
             return Command::FAILURE;
         }
 
-        if (empty($contactIds)) {
-            $io->warning('No contacts to process');
-
-            return Command::SUCCESS;
-        }
-
-        if ($limit > 0) {
-            $contactIds = array_slice($contactIds, 0, $limit);
-        }
-
-        $expiresAt = null;
-        if ($ttlHours > 0) {
-            $expiresAt = (new \DateTimeImmutable())->modify(sprintf('+%d hours', $ttlHours));
-        }
-
-        $io->title(sprintf('Pre-rendering email "%s" (ID %d)', $email->getName(), $emailId));
-        $io->progressStart(count($contactIds));
-
-        $success = 0;
-        $failed  = 0;
-
-        foreach (array_chunk($contactIds, $batch) as $chunk) {
-            foreach ($chunk as $contactId) {
-                $lead = $this->leadModel->getEntity($contactId);
-                if (null === $lead || !$lead->getEmail()) {
-                    ++$failed;
-                    $io->progressAdvance();
-                    continue;
-                }
-
-                if ($this->prerenderModel->prerenderForContact($email, $lead, $expiresAt)) {
-                    ++$success;
-                } else {
-                    ++$failed;
-                }
-
-                $io->progressAdvance();
-            }
-
-            // Free memory between batches
-            $this->leadModel->getRepository()->clear();
-            gc_collect_cycles();
-        }
-
-        $io->progressFinish();
-        $io->success(sprintf('Done. Success: %d, Failed: %d', $success, $failed));
+        $io->success(sprintf('Done. Processed: %d, Success: %d, Failed: %d', $processed, $success, $failed));
 
         return Command::SUCCESS;
+    }
+
+    /**
+     * Cursor-based batch of contact IDs currently in the segment (manually_removed = 0).
+     *
+     * @return list<int>
+     */
+    private function fetchSegmentContactIds(int $segmentId, int $lastId, int $limit): array
+    {
+        $prefix = defined('MAUTIC_TABLE_PREFIX') ? MAUTIC_TABLE_PREFIX : '';
+        $sql    = sprintf(
+            'SELECT lead_id FROM %slead_lists_leads
+             WHERE leadlist_id = :segmentId
+               AND manually_removed = 0
+               AND lead_id > :lastId
+             ORDER BY lead_id ASC
+             LIMIT %d',
+            $prefix,
+            $limit
+        );
+
+        $conn = $this->em->getConnection();
+        $rows = $conn->fetchFirstColumn($sql, [
+            'segmentId' => $segmentId,
+            'lastId'    => $lastId,
+        ]);
+
+        return array_map('intval', $rows);
+    }
+
+    private function processContact($email, int $contactId, ?\DateTimeInterface $expiresAt, int &$success, int &$failed): void
+    {
+        $lead = $this->leadModel->getEntity($contactId);
+        if (null === $lead || !$lead->getEmail()) {
+            ++$failed;
+
+            return;
+        }
+
+        if ($this->prerenderModel->prerenderForContact($email, $lead, $expiresAt)) {
+            ++$success;
+        } else {
+            ++$failed;
+        }
     }
 }

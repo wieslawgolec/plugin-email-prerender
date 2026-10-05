@@ -8,7 +8,7 @@ use Doctrine\ORM\Mapping as ORM;
 use Mautic\CoreBundle\Doctrine\Mapping\ClassMetadataBuilder;
 
 /**
- * Stores a fully rendered email payload for later reuse on email.send.
+ * Fully rendered email payload for reuse on email.send (generate once).
  */
 class EmailPrerenderCache
 {
@@ -27,6 +27,9 @@ class EmailPrerenderCache
     private string $html;
 
     private ?string $plainText = null;
+
+    /** @var array<string, mixed> */
+    private array $tokens = [];
 
     private \DateTimeInterface $createdAt;
 
@@ -67,6 +70,10 @@ class EmailPrerenderCache
 
         $builder->createField('plainText', 'text')
             ->columnName('plain_text')
+            ->nullable()
+            ->build();
+
+        $builder->createField('tokens', 'json')
             ->nullable()
             ->build();
 
@@ -169,6 +176,24 @@ class EmailPrerenderCache
     public function setPlainText(?string $plainText): self
     {
         $this->plainText = $plainText;
+
+        return $this;
+    }
+
+    /**
+     * @return array<string, mixed>
+     */
+    public function getTokens(): array
+    {
+        return $this->tokens ?? [];
+    }
+
+    /**
+     * @param array<string, mixed> $tokens
+     */
+    public function setTokens(array $tokens): self
+    {
+        $this->tokens = $tokens;
 
         return $this;
     }

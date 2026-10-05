@@ -4,9 +4,16 @@ declare(strict_types=1);
 
 return [
     'name'        => 'Email Pre-Render',
-    'description' => 'Pre-compiles and caches fully rendered email payloads to speed up high-volume email.send events. Compatible with Advanced Templates and other render plugins.',
-    'version'     => '1.0.0',
+    'description' => 'Pre-compiles and caches fully rendered email payloads (generate once, reuse on send). Configurable short-circuit for third-party plugin compatibility.',
+    'version'     => '1.1.0',
     'author'      => 'Wiesław Golec',
+
+    'parameters' => [
+        // Master switch for send-time cache reuse
+        'emailprerender.enabled' => true,
+        // On cache hit, stop further EMAIL_ON_SEND listeners (true = max speed; false = safer with some 3rd-party plugins)
+        'emailprerender.short_circuit' => true,
+    ],
 
     'services' => [
         'events' => [
@@ -14,6 +21,7 @@ return [
                 'class'     => \MauticPlugin\MauticEmailPreRenderBundle\EventListener\EmailPrerenderSubscriber::class,
                 'arguments' => [
                     'mautic.emailprerender.model',
+                    'mautic.helper.core_parameters',
                     'monolog.logger.mautic',
                 ],
                 'tag' => 'kernel.event_subscriber',
@@ -25,9 +33,6 @@ return [
                 'arguments' => [
                     'doctrine.orm.entity_manager',
                     'mautic.helper.mail',
-                    'event_dispatcher',
-                    'mautic.lead.model.lead',
-                    'mautic.email.model.email',
                     'monolog.logger.mautic',
                 ],
             ],
@@ -40,6 +45,7 @@ return [
                     'mautic.email.model.email',
                     'mautic.lead.model.list',
                     'mautic.lead.model.lead',
+                    'doctrine.orm.entity_manager',
                 ],
                 'tag' => 'console.command',
             ],
@@ -49,15 +55,6 @@ return [
                     'mautic.emailprerender.model',
                 ],
                 'tag' => 'console.command',
-            ],
-        ],
-        'repositories' => [
-            'mautic.emailprerender.repository' => [
-                'class'     => Doctrine\ORM\EntityRepository::class,
-                'factory'   => ['@doctrine.orm.entity_manager', 'getRepository'],
-                'arguments' => [
-                    \MauticPlugin\MauticEmailPreRenderBundle\Entity\EmailPrerenderCache::class,
-                ],
             ],
         ],
     ],

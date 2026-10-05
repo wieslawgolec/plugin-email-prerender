@@ -7,43 +7,38 @@ namespace MauticPlugin\MauticEmailPreRenderBundle\Model;
 use Doctrine\ORM\EntityManagerInterface;
 use Mautic\EmailBundle\Entity\Email;
 use Mautic\EmailBundle\Helper\MailHelper;
-use Mautic\EmailBundle\Model\EmailModel;
 use Mautic\LeadBundle\Entity\Lead;
-use Mautic\LeadBundle\Model\LeadModel;
 use MauticPlugin\MauticEmailPreRenderBundle\Entity\EmailPrerenderCache;
 use MauticPlugin\MauticEmailPreRenderBundle\Entity\EmailPrerenderCacheRepository;
 use Psr\Log\LoggerInterface;
-use Symfony\Component\EventDispatcher\EventDispatcherInterface;
 
 /**
- * Handles cache lookup, storage and the heavy lifting of driving MailHelper
- * through the full generation pipeline during pre-render.
+ * Cache storage + Mautic 7-compatible full generation via MailHelper::dispatchSendEvent().
+ * Does not deliver mail; only builds the same payload the real send path would build.
  */
 class PrerenderModel
 {
     public function __construct(
         private EntityManagerInterface $em,
         private MailHelper $mailHelper,
-        private EventDispatcherInterface $dispatcher,
-        private LeadModel $leadModel,
-        private EmailModel $emailModel,
         private LoggerInterface $logger,
     ) {
     }
 
     public function getRepository(): EmailPrerenderCacheRepository
     {
-        return $this->em->getRepository(EmailPrerenderCache::class);
+        /** @var EmailPrerenderCacheRepository $repo */
+        $repo = $this->em->getRepository(EmailPrerenderCache::class);
+
+        return $repo;
     }
 
-    /**
-     * Build a stable content fingerprint for the email template.
-     */
     public function buildContentHash(Email $email): string
     {
-        $parts = [
+        $revision = method_exists($email, 'getRevision') ? (string) $email->getRevision() : '';
+        $parts    = [
             (string) $email->getId(),
-            (string) $email->getRevision(),
+            $revision,
             md5((string) $email->getCustomHtml()),
             md5((string) $email->getSubject()),
             md5((string) $email->getPlainText()),
@@ -53,10 +48,7 @@ class PrerenderModel
     }
 
     /**
-     * Build a fingerprint of contact data that can affect rendering.
-     * Adjust the list of fields according to what your emails actually use.
-     *
-     * @param Lead|array $lead
+     * @param Lead|array<string, mixed> $lead
      */
     public function buildContactHash($lead): string
     {
@@ -66,16 +58,13 @@ class PrerenderModel
             $fields = $lead;
         }
 
-        // Include common personalization fields + a generic dump for safety.
-        // You can narrow this list for better cache hit rates.
         ksort($fields);
-        $relevant = json_encode($fields);
 
-        return hash('sha256', (string) $relevant);
+        return hash('sha256', (string) json_encode($fields));
     }
 
     /**
-     * @param Lead|array $lead
+     * @param Lead|array<string, mixed> $lead
      */
     public function findCache(Email $email, $lead): ?EmailPrerenderCache
     {
@@ -93,84 +82,93 @@ class PrerenderModel
     }
 
     /**
-     * Drive the full generation pipeline for one contact and store the result.
-     *
-     * IMPORTANT: This intentionally lets every EMAIL_ON_SEND listener
-     * (Advanced Templates, core, other plugins) run so the cached payload
-     * is identical to what a real send would produce.
+     * Run the full EMAIL_ON_SEND pipeline once and store the result.
+     * Compatible with Mautic 7.x MailHelper public API:
+     * reset, setEmail, setLead, setIdHash, setSource, setBody, setSubject,
+     * setPlainText, dispatchSendEvent, getBody, getSubject, getPlainText, getTokens.
      */
     public function prerenderForContact(Email $email, Lead $lead, ?\DateTimeInterface $expiresAt = null): bool
     {
+        if (!$lead->getEmail()) {
+            return false;
+        }
+
         try {
-            // Reset / configure MailHelper for this contact.
-            // Exact public API may vary slightly across Mautic 7.x minor versions;
-            // adjust if your installed version exposes different helpers.
-            $this->mailHelper->reset();
+            $this->mailHelper->reset(true);
             $this->mailHelper->setEmail($email);
             $this->mailHelper->setLead($lead->getProfileFields());
             $this->mailHelper->setIdHash();
-
-            // Trigger the same generation path used on real sends.
-            // Using send() with a dry-run / internal flag is safer in some versions;
-            // here we rely on the event listeners being fired while building the body.
             $this->mailHelper->setSource(['emailprerender', $email->getId()]);
 
-            // Force content generation (this will dispatch EMAIL_ON_SEND listeners).
-            $this->mailHelper->addTo($lead->getEmail());
-            $success = $this->mailHelper->send(false, true); // queue = false, drop = true (do not actually deliver)
+            // Seed from entity so listeners start from the same baseline as a real send
+            $html = (string) $email->getCustomHtml();
+            $this->mailHelper->setBody($html, 'text/html', null, true);
+            $this->mailHelper->setSubject((string) $email->getSubject());
 
-            if (!$success) {
-                $this->logger->warning('EmailPreRender: MailHelper reported failure for contact '.$lead->getId());
+            $plain = $email->getPlainText();
+            if ($plain) {
+                $this->mailHelper->setPlainText($plain);
+            }
+
+            // Full token / Twig / DWC / plugin pipeline — no transport delivery
+            $this->mailHelper->dispatchSendEvent();
+
+            $finalHtml    = (string) $this->mailHelper->getBody();
+            $finalSubject = (string) $this->mailHelper->getSubject();
+            $finalPlain   = $this->mailHelper->getPlainText();
+            $tokens       = method_exists($this->mailHelper, 'getTokens')
+                ? (array) $this->mailHelper->getTokens()
+                : [];
+
+            if ('' === $finalHtml) {
+                $this->logger->warning('EmailPreRender: empty HTML after dispatchSendEvent', [
+                    'contactId' => $lead->getId(),
+                    'emailId'   => $email->getId(),
+                ]);
 
                 return false;
             }
 
-            $html    = $this->mailHelper->getBody();
-            $subject = $this->mailHelper->getSubject();
-            $plain   = $this->mailHelper->getPlainText();
+            $contentHash = $this->buildContentHash($email);
+            $contactHash = $this->buildContactHash($lead);
 
-            if (empty($html)) {
-                $this->logger->warning('EmailPreRender: empty HTML after generation for contact '.$lead->getId());
-
-                return false;
+            $existing = $this->getRepository()->findValidCache(
+                (int) $email->getId(),
+                (int) $lead->getId(),
+                $contentHash,
+                $contactHash
+            );
+            if ($existing) {
+                $this->em->remove($existing);
+                $this->em->flush();
             }
 
             $cache = new EmailPrerenderCache();
             $cache->setEmailId((int) $email->getId())
                 ->setContactId((int) $lead->getId())
-                ->setContentHash($this->buildContentHash($email))
-                ->setContactHash($this->buildContactHash($lead))
-                ->setSubject((string) $subject)
-                ->setHtml((string) $html)
-                ->setPlainText($plain ?: null)
+                ->setContentHash($contentHash)
+                ->setContactHash($contactHash)
+                ->setSubject($finalSubject)
+                ->setHtml($finalHtml)
+                ->setPlainText($finalPlain ? (string) $finalPlain : null)
+                ->setTokens($tokens)
                 ->setCreatedAt(new \DateTimeImmutable())
                 ->setExpiresAt($expiresAt);
-
-            // Upsert-style: remove previous entry for same key then persist
-            $existing = $this->getRepository()->findValidCache(
-                $cache->getEmailId(),
-                $cache->getContactId(),
-                $cache->getContentHash(),
-                $cache->getContactHash()
-            );
-
-            if ($existing) {
-                $this->em->remove($existing);
-                $this->em->flush();
-            }
 
             $this->em->persist($cache);
             $this->em->flush();
 
             return true;
         } catch (\Throwable $e) {
-            $this->logger->error('EmailPreRender: exception while pre-rendering: '.$e->getMessage(), [
+            $this->logger->error('EmailPreRender: prerender failed: '.$e->getMessage(), [
                 'exception' => $e,
+                'contactId' => $lead->getId(),
+                'emailId'   => $email->getId(),
             ]);
 
             return false;
         } finally {
-            $this->mailHelper->reset();
+            $this->mailHelper->reset(true);
         }
     }
 

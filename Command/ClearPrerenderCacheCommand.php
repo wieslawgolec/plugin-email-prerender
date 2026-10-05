@@ -36,9 +36,9 @@ class ClearPrerenderCacheCommand extends Command
     {
         $io = new SymfonyStyle($input, $output);
 
-        $emailId  = $input->getOption('email') ? (int) $input->getOption('email') : null;
-        $all      = (bool) $input->getOption('all');
-        $expired  = (bool) $input->getOption('expired');
+        $emailId = $input->getOption('email') ? (int) $input->getOption('email') : null;
+        $all     = (bool) $input->getOption('all');
+        $expired = (bool) $input->getOption('expired');
 
         if ($all) {
             $count = $this->prerenderModel->clearAll();

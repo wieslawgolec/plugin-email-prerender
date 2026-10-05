@@ -41,7 +41,7 @@ class EmailPrerenderCacheRepository extends CommonRepository
 
     public function deleteByEmailId(int $emailId): int
     {
-        return $this->createQueryBuilder('c')
+        return (int) $this->createQueryBuilder('c')
             ->delete()
             ->where('c.emailId = :emailId')
             ->setParameter('emailId', $emailId)
@@ -51,7 +51,7 @@ class EmailPrerenderCacheRepository extends CommonRepository
 
     public function deleteAll(): int
     {
-        return $this->createQueryBuilder('c')
+        return (int) $this->createQueryBuilder('c')
             ->delete()
             ->getQuery()
             ->execute();
@@ -59,7 +59,7 @@ class EmailPrerenderCacheRepository extends CommonRepository
 
     public function deleteExpired(): int
     {
-        return $this->createQueryBuilder('c')
+        return (int) $this->createQueryBuilder('c')
             ->delete()
             ->where('c.expiresAt IS NOT NULL')
             ->andWhere('c.expiresAt < :now')
